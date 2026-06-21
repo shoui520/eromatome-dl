@@ -217,19 +217,22 @@ class DownloaderApp(tk.Tk):
 
     def _build_widgets(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=5)
 
         top = ttk.Frame(self, padding=(12, 12, 12, 8))
-        top.grid(row=0, column=0, sticky="ew")
+        top.grid(row=0, column=0, sticky="nsew")
         top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
 
         ttk.Label(top, text="Article Links").grid(row=0, column=0, sticky="nw", padx=(0, 8))
         input_frame = ttk.Frame(top)
-        input_frame.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        input_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         input_frame.columnconfigure(0, weight=1)
+        input_frame.rowconfigure(0, weight=1)
 
-        self.url_text = tk.Text(input_frame, height=4, wrap="word", undo=True)
-        self.url_text.grid(row=0, column=0, sticky="ew")
+        self.url_text = tk.Text(input_frame, height=8, wrap="word", undo=True)
+        self.url_text.grid(row=0, column=0, sticky="nsew")
         self.url_text.focus_set()
         url_scroll = ttk.Scrollbar(input_frame, orient="vertical", command=self.url_text.yview)
         url_scroll.grid(row=0, column=1, sticky="ns")

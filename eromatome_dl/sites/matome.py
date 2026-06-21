@@ -2181,6 +2181,74 @@ class HnaladyAdapter(ParserBackedAdapter):
         return parsed.scheme == "http" and parsed.netloc.lower() in self.hosts
 
 
+class NikkanerogArticleParser(BaseArticleParser):
+    article_hosts = frozenset({"nikkanerog.com", "www.nikkanerog.com"})
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url)
+        self._in_html_title = False
+        self._content_depth = 0
+        self._stop_images = False
+
+    def _handle_starttag(self, tag: str, attrs: dict[str, str], classes: set[str]) -> None:
+        if tag == "title" and not self.title_parts:
+            self._in_html_title = True
+            return
+
+        if self._content_depth and tag == "a" and "pr_button" in classes:
+            self._stop_images = True
+            self._content_depth = 0
+            return
+
+        if self._stop_images:
+            return
+
+        if tag == "div":
+            if self._content_depth:
+                self._content_depth += 1
+            elif "mainEntryMore" in classes:
+                self._content_depth = 1
+            return
+
+        if self._content_depth and tag == "img":
+            image_url = self._supported_nikkanerog_image_url(attrs.get("src", ""))
+            if image_url:
+                self._add_image(image_url, attrs.get("alt", ""))
+
+    def _handle_endtag(self, tag: str) -> None:
+        if tag == "title" and self._in_html_title:
+            self._in_html_title = False
+        elif tag == "div" and self._content_depth:
+            self._content_depth -= 1
+
+    def _handle_data(self, data: str) -> None:
+        if self._in_html_title:
+            self.title_parts.append(data)
+
+    def _supported_nikkanerog_image_url(self, value: str) -> str | None:
+        if not value:
+            return None
+
+        absolute = urljoin(self.base_url, value)
+        parsed = urlparse(absolute)
+        if not FC2_BLOG_IMAGE_HOST.match(parsed.netloc.lower()):
+            return None
+        if _fc2_blog_image_owner(parsed.path) != "erog":
+            return None
+        if not _is_image_url(absolute):
+            return None
+        return absolute
+
+
+class NikkanerogAdapter(ParserBackedAdapter):
+    hosts = NikkanerogArticleParser.article_hosts
+    parser_cls = NikkanerogArticleParser
+    image_context = "div.mainEntryMore FC2 images before a.pr_button"
+
+    def __init__(self) -> None:
+        super().__init__(name="nikkanerog")
+
+
 class EroGazouArticleParser(BaseArticleParser):
     title_class_sets = (frozenset({"entry-title"}),)
     image_hosts = frozenset({"ero-gazou.jp", "www.ero-gazou.jp"})
@@ -2503,6 +2571,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
         self._header_depth = 0
         self._content_done = False
         self._in_extra_title = False
+        self._in_permalink_title = False
         self._current_anchor_href: str | None = None
         self._hero_images: list[tuple[str, str]] = []
         self._content_images: list[tuple[str, str]] = []
@@ -2517,6 +2586,9 @@ class GenericMatomeArticleParser(BaseArticleParser):
             self._header_depth or tokens & self._title_tokens
         ):
             self._in_extra_title = True
+
+        if tag == "a" and not self.title_parts and self._header_depth:
+            self._in_permalink_title = self._is_current_article_link(attrs.get("href", ""))
 
         if self._content_depth and self._is_separator_terminator(tag, classes):
             self._content_depth = 0
@@ -2580,6 +2652,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
         if tag in {"h2", "h3"} and self._in_extra_title:
             self._in_extra_title = False
         elif tag == "a":
+            self._in_permalink_title = False
             self._current_anchor_href = None
         elif tag in self._container_tags:
             if self._header_depth:
@@ -2595,7 +2668,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
                     self._current_anchor_href = None
 
     def _handle_data(self, data: str) -> None:
-        if self._in_extra_title:
+        if self._in_extra_title or self._in_permalink_title:
             self.title_parts.append(data)
 
     def _image_url_from_attrs(self, attrs: dict[str, str], *, broad: bool) -> str | None:
@@ -2697,6 +2770,17 @@ class GenericMatomeArticleParser(BaseArticleParser):
 
     def _tokens(self, attrs: dict[str, str], classes: set[str]) -> set[str]:
         return {token.replace("_", "-").lower() for token in classes}
+
+    def _is_current_article_link(self, value: str) -> bool:
+        if not value:
+            return False
+
+        linked = urlparse(urljoin(self.base_url, value))
+        base = urlparse(self.base_url)
+        return (
+            linked.netloc.lower() == base.netloc.lower()
+            and linked.path.rstrip("/") == base.path.rstrip("/")
+        )
 
     def _best_supported_srcset_url(self, value: str, *, broad: bool) -> str | None:
         matches: list[tuple[int, str]] = []
