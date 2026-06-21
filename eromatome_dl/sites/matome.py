@@ -13,6 +13,7 @@ from eromatome_dl.sites.base import SiteAdapter, SiteParseError
 IMAGE_EXTENSIONS = re.compile(r"\.(?:jpe?g|png|gif|webp|bmp|avif)(?:[?#].*)?$", re.IGNORECASE)
 IE_CONDITIONAL_COMMENT_START = re.compile(r"<!--\[if\s[^>]*\]>", re.IGNORECASE)
 IE_CONDITIONAL_COMMENT_END = re.compile(r"<!\[endif\]-->", re.IGNORECASE)
+FC2_BLOG_IMAGE_HOST = re.compile(r"^blog-imgs-\d+\.fc2\.com$", re.IGNORECASE)
 NIJIMOE_EROGAZOU_PUNYCODE_HOST = "xn--r8jwklh769h2mc880dk1o431a.com"
 NIJIMOE_EROGAZOU_UNICODE_HOST = "二次萌えエロ画像.com"
 DEBUSEN_PUNYCODE_HOST = "xn--edk4a626w.net"
@@ -55,6 +56,20 @@ def _hostname_root(hostname: str) -> str:
     if len(parts[-2]) <= 3 and len(parts) >= 3:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
+
+
+def _fc2_blog_image_owner(path: str) -> str | None:
+    parts = [part.lower() for part in path.split("/") if part]
+    if len(parts) < 4:
+        return None
+    return parts[3]
+
+
+def _host_site_slug(hostname: str) -> str:
+    host = hostname.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host.split(".", 1)[0]
 
 
 def _strip_ie_conditional_markers(html: str) -> str:
@@ -2306,23 +2321,71 @@ class EroGazouAdapter(ParserBackedAdapter):
 
 class GenericMatomeArticleParser(BaseArticleParser):
     title_class_sets = (frozenset(),)
-    _container_tags = {"article", "aside", "div", "figure", "footer", "main", "nav", "section", "ul", "ol", "li"}
+    _container_tags = {
+        "article",
+        "aside",
+        "div",
+        "figure",
+        "footer",
+        "iframe",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "section",
+        "ul",
+    }
+    _title_tokens = {
+        "article-title",
+        "box-title02",
+        "c-posttitle--ttl",
+        "c-posttitle-ttl",
+        "entry-title",
+        "h1text",
+        "single-heading",
+        "single-post-title",
+        "title",
+    }
+    _header_tokens = {
+        "article-header",
+        "entry-header",
+        "post-header",
+        "single-header",
+    }
     _content_tokens = {
+        "article-img",
+        "article-imgs",
+        "article-image",
         "article-body",
         "article-content",
-        "article__body",
+        "article--body",
         "bialty-container",
         "box",
+        "content",
         "content-inner",
+        "entry",
+        "entry-body",
         "entry-content",
+        "gallery",
         "honbun",
+        "imagebox",
+        "img-box",
+        "img-fav-add-waku",
+        "img-list",
+        "imgbox",
         "iwe-shadow-paper",
+        "main-content",
         "mainbox",
         "post-body",
         "post-content",
-        "post_content",
         "single-content",
+        "single-box",
         "singlebox",
+        "the-content",
+        "wp-block-gallery",
+        "wp-block-image",
+    }
+    _content_ids = {
         "the-content",
     }
     _hero_tokens = {
@@ -2332,6 +2395,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
         "eyecatch",
         "p-articlethumb",
         "post-thumbnail",
+        "single-eyecatch",
         "st-eyecatch-under",
     }
     _ignored_tokens = {
@@ -2343,19 +2407,30 @@ class GenericMatomeArticleParser(BaseArticleParser):
         "advertisement",
         "ams-feed-wrap",
         "article-footer",
+        "article-sub-category",
         "banner",
         "blogroll",
         "breadcrumb",
         "comment",
         "comments",
+        "contents-afi",
+        "element-pagenavi",
         "entry-footer",
+        "entry-header",
+        "entry-bottom",
         "favorite",
         "footer",
+        "freebox",
         "header",
+        "img-dmm-link-btn",
         "kanren",
         "menu",
         "nav",
+        "onlinebanner",
         "pager",
+        "pagerarea",
+        "pager-links",
+        "pager-prev-next",
         "pagination",
         "pickup",
         "popular",
@@ -2366,11 +2441,41 @@ class GenericMatomeArticleParser(BaseArticleParser):
         "related",
         "share",
         "sidebar",
+        "singleatode",
         "singlebottom",
         "singletop",
+        "swell-block-button",
         "sns",
+        "w-singlebottom",
+        "w-singletop",
         "widget",
         "wpulike",
+        "wpulike-heart",
+    }
+    _terminator_ids = {
+        "jp-relatedposts",
+        "related_post",
+        "single-page-links",
+    }
+    _terminator_tokens = {
+        "article-footer",
+        "contents-afi",
+        "element-pagenavi",
+        "entry-bottom",
+        "entry-footer",
+        "freebox",
+        "has-title",
+        "pager",
+        "pagerarea",
+        "pager-links",
+        "pager-prev-next",
+        "related",
+        "singleatode",
+        "singlebottom",
+        "swell-block-button",
+        "w-singlebottom",
+        "wpulike",
+        "wpulike-heart",
     }
     _ad_hosts = {
         "ad.doubleclick.net",
@@ -2395,7 +2500,9 @@ class GenericMatomeArticleParser(BaseArticleParser):
         self._content_depth = 0
         self._hero_depth = 0
         self._ignored_depth = 0
+        self._header_depth = 0
         self._content_done = False
+        self._in_extra_title = False
         self._current_anchor_href: str | None = None
         self._hero_images: list[tuple[str, str]] = []
         self._content_images: list[tuple[str, str]] = []
@@ -2405,6 +2512,12 @@ class GenericMatomeArticleParser(BaseArticleParser):
         return not self.title_parts
 
     def _handle_starttag(self, tag: str, attrs: dict[str, str], classes: set[str]) -> None:
+        tokens = self._tokens(attrs, classes)
+        if tag in {"h2", "h3"} and not self.title_parts and (
+            self._header_depth or tokens & self._title_tokens
+        ):
+            self._in_extra_title = True
+
         if self._content_depth and self._is_separator_terminator(tag, classes):
             self._content_depth = 0
             self._hero_depth = 0
@@ -2412,7 +2525,22 @@ class GenericMatomeArticleParser(BaseArticleParser):
             self._current_anchor_href = None
             return
 
+        if self._content_depth and self._is_content_terminator(tag, attrs, classes):
+            if self._content_images:
+                self._content_depth = 0
+                self._hero_depth = 0
+                self._content_done = True
+            else:
+                self._ignored_depth = 1
+            self._current_anchor_href = None
+            return
+
         if tag in self._container_tags:
+            if self._header_depth:
+                self._header_depth += 1
+            elif tokens & self._header_tokens:
+                self._header_depth = 1
+
             if self._ignored_depth:
                 self._ignored_depth += 1
                 return
@@ -2449,9 +2577,13 @@ class GenericMatomeArticleParser(BaseArticleParser):
                 self._add_candidate(image_url, attrs.get("alt", ""))
 
     def _handle_endtag(self, tag: str) -> None:
-        if tag == "a":
+        if tag in {"h2", "h3"} and self._in_extra_title:
+            self._in_extra_title = False
+        elif tag == "a":
             self._current_anchor_href = None
         elif tag in self._container_tags:
+            if self._header_depth:
+                self._header_depth -= 1
             if self._ignored_depth:
                 self._ignored_depth -= 1
                 return
@@ -2461,6 +2593,10 @@ class GenericMatomeArticleParser(BaseArticleParser):
                 self._content_depth -= 1
                 if self._content_depth == 0:
                     self._current_anchor_href = None
+
+    def _handle_data(self, data: str) -> None:
+        if self._in_extra_title:
+            self.title_parts.append(data)
 
     def _image_url_from_attrs(self, attrs: dict[str, str], *, broad: bool) -> str | None:
         return (
@@ -2495,8 +2631,12 @@ class GenericMatomeArticleParser(BaseArticleParser):
     def _is_content_container(self, tag: str, attrs: dict[str, str], classes: set[str]) -> bool:
         if tag == "article":
             return True
+        if tag == "li" and attrs.get("data-img-id"):
+            return True
 
         tokens = self._tokens(attrs, classes)
+        if attrs.get("id", "").lower() in self._content_ids:
+            return True
         if tokens & self._content_tokens:
             return True
 
@@ -2504,9 +2644,12 @@ class GenericMatomeArticleParser(BaseArticleParser):
         return any(
             pattern in combined
             for pattern in (
+                "article-img",
                 "article-body",
                 "article-content",
+                "entry-body",
                 "entry-content",
+                "imgbox",
                 "post-body",
                 "post-content",
                 "single-content",
@@ -2524,7 +2667,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
             return True
 
         tokens = self._tokens(attrs, classes)
-        if attrs.get("id") == "jp-relatedposts":
+        if attrs.get("id") in self._terminator_ids:
             return True
         if tokens & self._ignored_tokens:
             return True
@@ -2537,6 +2680,14 @@ class GenericMatomeArticleParser(BaseArticleParser):
             for token in tokens
         )
 
+    def _is_content_terminator(self, tag: str, attrs: dict[str, str], classes: set[str]) -> bool:
+        tokens = self._tokens(attrs, classes)
+        if attrs.get("id") in self._terminator_ids:
+            return True
+        if tag == "button" and _has_classes(classes, "simplefavorite-button", "has-count"):
+            return True
+        return bool(tokens & self._terminator_tokens)
+
     def _is_separator_terminator(self, tag: str, classes: set[str]) -> bool:
         return (
             tag == "hr"
@@ -2545,11 +2696,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
         )
 
     def _tokens(self, attrs: dict[str, str], classes: set[str]) -> set[str]:
-        tokens = {token.replace("_", "-").lower() for token in classes}
-        element_id = attrs.get("id", "").replace("_", "-").lower()
-        if element_id:
-            tokens.add(element_id)
-        return tokens
+        return {token.replace("_", "-").lower() for token in classes}
 
     def _best_supported_srcset_url(self, value: str, *, broad: bool) -> str | None:
         matches: list[tuple[int, str]] = []
@@ -2580,6 +2727,8 @@ class GenericMatomeArticleParser(BaseArticleParser):
             if self._is_blocked_image_host(proxied_host):
                 return None
             return origin_url if proxied_host == self._base_host else None
+        if self._is_supported_fc2_image(host, parsed.path, broad=broad):
+            return absolute
         if broad:
             return absolute
         if host == self._base_host or host.endswith(f".{self._base_host}"):
@@ -2592,6 +2741,15 @@ class GenericMatomeArticleParser(BaseArticleParser):
         if host in self._ad_hosts or any(host.endswith(f".{ad_host}") for ad_host in self._ad_hosts):
             return True
         return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._blocked_image_host_suffixes)
+
+    def _is_supported_fc2_image(self, host: str, path: str, *, broad: bool) -> bool:
+        if not FC2_BLOG_IMAGE_HOST.match(host):
+            return False
+        if broad or self._base_root == "fc2.com":
+            return True
+
+        owner = _fc2_blog_image_owner(path)
+        return bool(owner and owner == _host_site_slug(self._base_host))
 
 
 class GenericMatomeAdapter(SiteAdapter):

@@ -12,6 +12,7 @@ from time import monotonic
 from urllib.parse import urlparse
 import re
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
@@ -138,6 +139,7 @@ class DownloaderApp(tk.Tk):
         super().__init__()
         self.title("Eromatome DL")
         self.minsize(1080, 680)
+        self._configure_text_rendering()
 
         self.items: dict[str, QueueItem] = {}
         self.item_order: list[str] = []
@@ -158,6 +160,46 @@ class DownloaderApp(tk.Tk):
         self._build_widgets()
         self._update_buttons()
         self.after(100, self._drain_events)
+
+    def _configure_text_rendering(self) -> None:
+        family = self._preferred_ui_font()
+        if not family:
+            return
+
+        for font_name in (
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkMenuFont",
+            "TkHeadingFont",
+            "TkCaptionFont",
+            "TkSmallCaptionFont",
+            "TkIconFont",
+            "TkTooltipFont",
+        ):
+            try:
+                tkfont.nametofont(font_name).configure(family=family)
+            except tk.TclError:
+                pass
+
+        style = ttk.Style(self)
+        default_size = tkfont.nametofont("TkDefaultFont").cget("size")
+        style.configure("Treeview", font=(family, default_size), rowheight=max(22, abs(int(default_size)) + 12))
+        style.configure("Treeview.Heading", font=(family, default_size, "bold"))
+
+    def _preferred_ui_font(self) -> str:
+        available = {family.lower(): family for family in tkfont.families(self)}
+        for family in (
+            "Yu Gothic UI",
+            "Meiryo UI",
+            "Meiryo",
+            "MS PGothic",
+            "MS Gothic",
+            "Noto Sans CJK JP",
+            "Segoe UI",
+        ):
+            if family.lower() in available:
+                return available[family.lower()]
+        return ""
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self)
