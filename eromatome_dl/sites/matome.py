@@ -5,7 +5,7 @@ from posixpath import normpath
 from urllib.parse import parse_qs, quote, urljoin, urlparse, urlsplit, urlunsplit
 import re
 
-from eromatome_dl.http import DownloadError, HttpClient, RedirectBlocked
+from eromatome_dl.http import DownloadError, HttpClient, JETPACK_IMAGE_HOSTS, RedirectBlocked, jetpack_origin_url
 from eromatome_dl.models import Article, ImageItem, dedupe_images, title_fallback_from_url
 from eromatome_dl.sites.base import SiteAdapter, SiteParseError
 
@@ -1186,7 +1186,6 @@ class HentaiWitchAdapter(ParserBackedAdapter):
 class AdamanEroArticleParser(BaseArticleParser):
     title_class_sets = (frozenset({"entry-title"}),)
     article_hosts = frozenset({"adaman-ero.com", "www.adaman-ero.com"})
-    jetpack_hosts = frozenset({"i0.wp.com", "i1.wp.com", "i2.wp.com"})
 
     def __init__(self, base_url: str) -> None:
         super().__init__(base_url)
@@ -1287,8 +1286,10 @@ class AdamanEroArticleParser(BaseArticleParser):
             if not _is_image_url(absolute):
                 return None
             return absolute
-        if host in self.jetpack_hosts and parsed.path.startswith("/adaman-ero.com/") and _is_image_url(absolute):
-            return absolute
+        if host in JETPACK_IMAGE_HOSTS and _is_image_url(absolute):
+            origin_url = jetpack_origin_url(absolute)
+            if origin_url and urlparse(origin_url).netloc.lower() in self.article_hosts:
+                return origin_url
         return None
 
 
@@ -2571,11 +2572,14 @@ class GenericMatomeArticleParser(BaseArticleParser):
             return None
         if self._is_blocked_image_host(host):
             return None
-        if host in {"i0.wp.com", "i1.wp.com", "i2.wp.com"}:
-            proxied_host = parsed.path.lstrip("/").split("/", 1)[0].lower()
+        if host in JETPACK_IMAGE_HOSTS:
+            origin_url = jetpack_origin_url(absolute)
+            if not origin_url:
+                return None
+            proxied_host = urlparse(origin_url).netloc.lower()
             if self._is_blocked_image_host(proxied_host):
                 return None
-            return absolute if proxied_host == self._base_host else None
+            return origin_url if proxied_host == self._base_host else None
         if broad:
             return absolute
         if host == self._base_host or host.endswith(f".{self._base_host}"):

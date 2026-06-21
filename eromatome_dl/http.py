@@ -14,6 +14,9 @@ import mimetypes
 import os
 
 
+JETPACK_IMAGE_HOSTS = frozenset({"i0.wp.com", "i1.wp.com", "i2.wp.com"})
+
+
 class DownloadError(RuntimeError):
     """Raised when a network request or download fails."""
 
@@ -82,6 +85,27 @@ def iri_to_uri(url: str) -> str:
     )
 
 
+def jetpack_origin_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.netloc.lower() not in JETPACK_IMAGE_HOSTS:
+        return None
+
+    path = parsed.path.lstrip("/")
+    if "/" not in path:
+        return None
+
+    host, image_path = path.split("/", 1)
+    if not host or not image_path:
+        return None
+
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        ascii_host = host
+
+    return urlunsplit(("https", ascii_host.lower(), f"/{image_path}", "", ""))
+
+
 class HttpClient:
     """Small no-redirect HTTP client based on the Python standard library."""
 
@@ -139,43 +163,51 @@ class HttpClient:
             headers["Referer"] = iri_to_uri(referer)
 
         request_url = iri_to_uri(url)
-        request = Request(request_url, headers=headers, method="GET")
+        attempt_urls = [request_url]
+        origin_url = jetpack_origin_url(request_url)
+        if origin_url and origin_url != request_url:
+            attempt_urls.append(origin_url)
         part_path = destination.with_name(f"{destination.name}.part")
 
-        try:
-            with self._opener.open(request, timeout=self.timeout) as response:
-                status = getattr(response, "status", 200)
-                if 300 <= status < 400:
-                    raise RedirectBlocked(f"Redirect blocked for {url}")
+        for index, attempt_url in enumerate(attempt_urls):
+            request = Request(attempt_url, headers=headers, method="GET")
+            try:
+                with self._opener.open(request, timeout=self.timeout) as response:
+                    status = getattr(response, "status", 200)
+                    if 300 <= status < 400:
+                        raise RedirectBlocked(f"Redirect blocked for {url}")
 
-                total_header = response.headers.get("Content-Length")
-                total = int(total_header) if total_header and total_header.isdigit() else None
-                downloaded = 0
-                with part_path.open("wb") as file:
-                    while True:
-                        chunk = response.read(1024 * 128)
-                        if not chunk:
-                            break
-                        file.write(chunk)
-                        downloaded += len(chunk)
-                        if progress:
-                            progress(downloaded, total)
-                os.replace(part_path, destination)
-        except HTTPError as exc:
-            part_path.unlink(missing_ok=True)
-            if 300 <= exc.code < 400:
-                raise RedirectBlocked(f"Redirect blocked for {url}") from exc
-            raise DownloadError(f"HTTP {exc.code} for {url}") from exc
-        except URLError as exc:
-            part_path.unlink(missing_ok=True)
-            reason = getattr(exc, "reason", exc)
-            raise DownloadError(f"Network error for {url}: {reason}") from exc
-        except OSError as exc:
-            part_path.unlink(missing_ok=True)
-            raise DownloadError(f"Could not download {url}: {exc}") from exc
-        except Exception:
-            part_path.unlink(missing_ok=True)
-            raise
+                    total_header = response.headers.get("Content-Length")
+                    total = int(total_header) if total_header and total_header.isdigit() else None
+                    downloaded = 0
+                    with part_path.open("wb") as file:
+                        while True:
+                            chunk = response.read(1024 * 128)
+                            if not chunk:
+                                break
+                            file.write(chunk)
+                            downloaded += len(chunk)
+                            if progress:
+                                progress(downloaded, total)
+                    os.replace(part_path, destination)
+                    return
+            except HTTPError as exc:
+                part_path.unlink(missing_ok=True)
+                if 300 <= exc.code < 400:
+                    raise RedirectBlocked(f"Redirect blocked for {url}") from exc
+                if exc.code == 404 and index == 0 and len(attempt_urls) > 1:
+                    continue
+                raise DownloadError(f"HTTP {exc.code} for {url}") from exc
+            except URLError as exc:
+                part_path.unlink(missing_ok=True)
+                reason = getattr(exc, "reason", exc)
+                raise DownloadError(f"Network error for {url}: {reason}") from exc
+            except OSError as exc:
+                part_path.unlink(missing_ok=True)
+                raise DownloadError(f"Could not download {url}: {exc}") from exc
+            except Exception:
+                part_path.unlink(missing_ok=True)
+                raise
 
 
 def filename_from_url(url: str, *, fallback: str, content_type: str = "") -> str:
