@@ -24,17 +24,17 @@ from eromatome_dl.sites.matome import (
     LesKokoAdapter,
     LoveliveforeverAdapter,
     MegamichAdapter,
+    MoeimgAdapter,
     NijiPinkAdapter,
     NikkanerogAdapter,
     NijimoeEroGazouAdapter,
     NijifanAdapter,
     OppaisanAdapter,
+    PashalismAdapter,
     SengiribestAdapter,
     SexuadAdapter,
     YaruoAdapter,
 )
-from eromatome_dl.sites.moeimg import MoeimgAdapter
-from eromatome_dl.sites.pashalism import PashalismAdapter
 
 
 ADAPTERS: tuple[SiteAdapter, ...] = (

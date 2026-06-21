@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from posixpath import normpath
-from urllib.parse import parse_qs, quote, urljoin, urlparse, urlsplit, urlunsplit
+from pathlib import PurePosixPath
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 import re
 
 from eromatome_dl.http import DownloadError, HttpClient, JETPACK_IMAGE_HOSTS, RedirectBlocked, jetpack_origin_url
@@ -49,6 +51,16 @@ def _srcset_candidates(value: str) -> list[tuple[int, str]]:
     return candidates
 
 
+def _number_text(value: str) -> str:
+    return "".join(value.split())
+
+
+def _leading_filename_number(url: str) -> str:
+    filename = PurePosixPath(unquote(urlparse(url).path)).name
+    match = re.match(r"^(\d+)(?:\D|$)", filename)
+    return match.group(1) if match else ""
+
+
 def _hostname_root(hostname: str) -> str:
     parts = hostname.lower().split(".")
     if len(parts) <= 2:
@@ -63,6 +75,14 @@ def _fc2_blog_image_owner(path: str) -> str | None:
     if len(parts) < 4:
         return None
     return parts[3]
+
+
+def _canonical_fc2_blog_image_url(url: str) -> str:
+    split = urlsplit(url)
+    host = (split.hostname or "").lower()
+    if split.scheme == "http" and FC2_BLOG_IMAGE_HOST.match(host):
+        return urlunsplit(("https", split.netloc, split.path, split.query, split.fragment))
+    return url
 
 
 def _host_site_slug(hostname: str) -> str:
@@ -191,6 +211,156 @@ class ParserBackedAdapter(SiteAdapter):
             raise SiteParseError(f"No downloadable {self.name} article images were found in {self.image_context}.")
 
         return Article(url=url, title=title, images=images)
+
+
+@dataclass(frozen=True)
+class MoeimgImageCandidate:
+    url: str
+    alt: str
+
+
+class MoeimgArticleParser(BaseArticleParser):
+    title_class_sets = (frozenset({"title"}),)
+    image_hosts = frozenset({"moeimg.net"})
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url)
+        self._base_netloc = urlparse(base_url).netloc.lower()
+        self._stop_images = False
+        self._box_depth = 0
+        self._current_anchor_href: str | None = None
+        self._current_num_parts: list[str] = []
+        self._current_num_depth = 0
+        self._candidates: list[MoeimgImageCandidate] = []
+
+    def _handle_starttag(self, tag: str, attrs: dict[str, str], classes: set[str]) -> None:
+        if tag == "div" and "entry-footer" in classes:
+            self._finalize_box()
+            self._stop_images = True
+            return
+
+        if self._stop_images:
+            return
+
+        if tag == "div" and "box" in classes:
+            self._reset_current_box()
+            self._box_depth = 1
+            return
+
+        if not self._box_depth:
+            return
+
+        if tag == "div":
+            self._box_depth += 1
+            if "num" in classes:
+                self._current_num_depth = self._box_depth
+        elif tag == "a":
+            image_url = self._supported_moeimg_image_url(attrs.get("href", ""))
+            self._current_anchor_href = image_url
+        elif tag == "img":
+            image_url = self._supported_moeimg_image_url(attrs.get("src", ""))
+            if image_url:
+                self._candidates.append(
+                    MoeimgImageCandidate(
+                        url=self._current_anchor_href or image_url,
+                        alt=attrs.get("alt", ""),
+                    )
+                )
+
+    def _handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._box_depth:
+            self._current_anchor_href = None
+        elif tag == "div" and self._box_depth:
+            if self._current_num_depth == self._box_depth:
+                self._current_num_depth = 0
+            self._box_depth -= 1
+            if self._box_depth == 0:
+                self._finalize_box()
+
+    def _handle_data(self, data: str) -> None:
+        if self._current_num_depth:
+            self._current_num_parts.append(data)
+
+    def _finalize_box(self) -> None:
+        box_number = _number_text("".join(self._current_num_parts))
+        if box_number.isdigit():
+            for candidate in self._candidates:
+                if self._candidate_matches_box(candidate, box_number):
+                    self._add_image(candidate.url, candidate.alt)
+                    break
+        self._reset_current_box()
+
+    def _candidate_matches_box(self, candidate: MoeimgImageCandidate, box_number: str) -> bool:
+        return _number_text(candidate.alt) == box_number or _leading_filename_number(candidate.url) == box_number
+
+    def _reset_current_box(self) -> None:
+        self._box_depth = 0
+        self._current_anchor_href = None
+        self._current_num_parts = []
+        self._current_num_depth = 0
+        self._candidates = []
+
+    def _supported_moeimg_image_url(self, value: str) -> str | None:
+        image_url = self._supported_image_url(value, self.image_hosts)
+        if not image_url:
+            return None
+        if urlparse(image_url).netloc.lower() != self._base_netloc:
+            return None
+        return image_url
+
+
+class MoeimgAdapter(ParserBackedAdapter):
+    hosts = MoeimgArticleParser.image_hosts
+    parser_cls = MoeimgArticleParser
+    image_context = "numbered div.box image entries before div.entry-footer"
+
+    def __init__(self) -> None:
+        super().__init__(name="moeimg")
+
+
+class PashalismArticleParser(BaseArticleParser):
+    title_class_sets = (frozenset({"single-post-title", "entry-title"}),)
+    image_hosts = frozenset({"pashalism.com", "www.pashalism.com"})
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url)
+        self._content_depth = 0
+        self._content_done = False
+        self._current_anchor_href: str | None = None
+
+    def _handle_starttag(self, tag: str, attrs: dict[str, str], classes: set[str]) -> None:
+        if tag == "div" and not self._content_done:
+            if self._content_depth:
+                self._content_depth += 1
+            elif "content" in classes:
+                self._content_depth = 1
+            return
+
+        if not self._content_depth:
+            return
+
+        if tag == "a":
+            self._current_anchor_href = self._supported_image_url(attrs.get("href", ""), self.image_hosts)
+        elif tag == "img" and self._current_anchor_href:
+            self._add_image(self._current_anchor_href, attrs.get("alt", ""))
+
+    def _handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._content_depth:
+            self._current_anchor_href = None
+        elif tag == "div" and self._content_depth:
+            self._content_depth -= 1
+            if self._content_depth == 0:
+                self._content_done = True
+                self._current_anchor_href = None
+
+
+class PashalismAdapter(ParserBackedAdapter):
+    hosts = PashalismArticleParser.image_hosts
+    parser_cls = PashalismArticleParser
+    image_context = "anchor image URLs inside div.content"
+
+    def __init__(self) -> None:
+        super().__init__(name="pashalism")
 
 
 class KimootokoArticleParser(BaseArticleParser):
@@ -2165,7 +2335,7 @@ class HnaladyArticleParser(BaseArticleParser):
             return None
         if not _is_image_url(absolute):
             return None
-        return absolute
+        return _canonical_fc2_blog_image_url(absolute)
 
 
 class HnaladyAdapter(ParserBackedAdapter):
@@ -2237,7 +2407,7 @@ class NikkanerogArticleParser(BaseArticleParser):
             return None
         if not _is_image_url(absolute):
             return None
-        return absolute
+        return _canonical_fc2_blog_image_url(absolute)
 
 
 class NikkanerogAdapter(ParserBackedAdapter):
@@ -2812,7 +2982,7 @@ class GenericMatomeArticleParser(BaseArticleParser):
                 return None
             return origin_url if proxied_host == self._base_host else None
         if self._is_supported_fc2_image(host, parsed.path, broad=broad):
-            return absolute
+            return _canonical_fc2_blog_image_url(absolute)
         if broad:
             return absolute
         if host == self._base_host or host.endswith(f".{self._base_host}"):
