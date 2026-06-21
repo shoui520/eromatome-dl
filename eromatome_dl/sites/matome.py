@@ -2724,17 +2724,18 @@ class GenericMatomeArticleParser(BaseArticleParser):
         "googlesyndication.com",
         "pagead2.googlesyndication.com",
     }
-    _blocked_image_host_suffixes = (
+    _dmm_fanza_image_host_suffixes = (
         "dmm.co.jp",
         "dmm.com",
         "fanza.jp",
     )
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, filter_dmm_fanza: bool = False) -> None:
         super().__init__(base_url)
         parsed = urlparse(base_url)
         self._base_host = parsed.netloc.lower()
         self._base_root = _hostname_root(self._base_host)
+        self._filter_dmm_fanza = filter_dmm_fanza
         self._content_depth = 0
         self._hero_depth = 0
         self._ignored_depth = 0
@@ -2980,7 +2981,11 @@ class GenericMatomeArticleParser(BaseArticleParser):
             proxied_host = urlparse(origin_url).netloc.lower()
             if self._is_blocked_image_host(proxied_host):
                 return None
-            return origin_url if proxied_host == self._base_host else None
+            if broad:
+                return origin_url
+            if proxied_host == self._base_host or proxied_host.endswith(f".{self._base_host}"):
+                return origin_url
+            return origin_url if _hostname_root(proxied_host) == self._base_root else None
         if self._is_supported_fc2_image(host, parsed.path, broad=broad):
             return _canonical_fc2_blog_image_url(absolute)
         if broad:
@@ -2994,7 +2999,9 @@ class GenericMatomeArticleParser(BaseArticleParser):
     def _is_blocked_image_host(self, host: str) -> bool:
         if host in self._ad_hosts or any(host.endswith(f".{ad_host}") for ad_host in self._ad_hosts):
             return True
-        return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._blocked_image_host_suffixes)
+        if not self._filter_dmm_fanza:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._dmm_fanza_image_host_suffixes)
 
     def _is_supported_fc2_image(self, host: str, path: str, *, broad: bool) -> bool:
         if not FC2_BLOG_IMAGE_HOST.match(host):
@@ -3007,15 +3014,19 @@ class GenericMatomeArticleParser(BaseArticleParser):
 
 
 class GenericMatomeAdapter(SiteAdapter):
-    def __init__(self) -> None:
+    def __init__(self, *, filter_dmm_fanza: bool = False) -> None:
         super().__init__(name="generic-matome")
+        self.filter_dmm_fanza = filter_dmm_fanza
 
     def supports(self, url: str) -> bool:
         parsed = urlparse(url)
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     def parse(self, url: str, html: str) -> Article:
-        parser = GenericMatomeArticleParser(url)
+        return self.parse_with_options(url, html, filter_dmm_fanza=self.filter_dmm_fanza)
+
+    def parse_with_options(self, url: str, html: str, *, filter_dmm_fanza: bool = False) -> Article:
+        parser = GenericMatomeArticleParser(url, filter_dmm_fanza=filter_dmm_fanza)
         parser.feed(html)
         parser.close()
 
@@ -3024,3 +3035,14 @@ class GenericMatomeAdapter(SiteAdapter):
         if not images:
             raise SiteParseError("No downloadable generic matome article images were found.")
         return Article(url=url, title=title, images=images)
+
+    def scan_with_options(
+        self,
+        url: str,
+        client: HttpClient | None = None,
+        *,
+        filter_dmm_fanza: bool = False,
+    ) -> Article:
+        http = client or HttpClient()
+        response = http.get(url)
+        return self.parse_with_options(url, response.text, filter_dmm_fanza=filter_dmm_fanza)

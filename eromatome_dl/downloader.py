@@ -22,13 +22,21 @@ class DownloadResult:
     skipped: bool = False
 
 
-def scan_article(url: str, client: HttpClient | None = None) -> Article:
+def scan_article(
+    url: str,
+    client: HttpClient | None = None,
+    *,
+    filter_dmm_fanza: bool = False,
+) -> Article:
     adapter = adapter_for_url(url)
     if adapter is None:
         raise UnsupportedSiteError(f"No site adapter supports this URL: {url}")
 
     http = client or HttpClient()
     try:
+        scan_with_options = getattr(adapter, "scan_with_options", None)
+        if scan_with_options:
+            return scan_with_options(url, http, filter_dmm_fanza=filter_dmm_fanza)
         return adapter.scan(url, http)
     except SiteParseError:
         raise

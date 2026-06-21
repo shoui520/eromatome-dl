@@ -59,6 +59,7 @@ class QueueItem:
     speed_updated_at: float = 0.0
     article: Article | None = None
     output_dir: Path | None = None
+    filter_dmm_fanza: bool | None = None
     error: str = ""
 
     def values(self) -> tuple[str, str, str, str, str, str, str]:
@@ -152,6 +153,7 @@ class DownloaderApp(tk.Tk):
 
         self.skip_existing = tk.BooleanVar(value=True)
         self.create_site_subfolder = tk.BooleanVar(value=False)
+        self.filter_dmm_fanza = tk.BooleanVar(value=False)
         self.download_folder_var = tk.StringVar(value=str(default_download_folder()))
         self.status_var = tk.StringVar(value="Ready")
         self.progress_var = tk.DoubleVar(value=0)
@@ -207,6 +209,11 @@ class DownloaderApp(tk.Tk):
         options.add_checkbutton(
             label="Create site-dependent subfolders",
             variable=self.create_site_subfolder,
+        )
+        options.add_checkbutton(
+            label="Filter DMM/FANZA image links",
+            variable=self.filter_dmm_fanza,
+            command=self._update_buttons,
         )
         options.add_checkbutton(
             label="Skip existing files",
@@ -378,9 +385,9 @@ class DownloaderApp(tk.Tk):
 
     def scan_queue(self) -> None:
         if not self._has_scan_work():
-            messagebox.showinfo("Nothing to scan", "The queue has no unscanned links.")
+            messagebox.showinfo("Nothing to scan", "The queue has no links that need scanning.")
             return
-        self._start_worker("scan", "Scanning", self._scan_worker)
+        self._start_worker("scan", "Scanning", self._scan_worker, self.filter_dmm_fanza.get())
 
     def download_queue(self) -> None:
         if not self._has_download_work():
@@ -389,6 +396,7 @@ class DownloaderApp(tk.Tk):
         download_folder = Path(self.download_folder_var.get()).expanduser()
         create_site_subfolder = self.create_site_subfolder.get()
         skip_existing = self.skip_existing.get()
+        filter_dmm_fanza = self.filter_dmm_fanza.get()
         self._start_worker(
             "download",
             "Downloading",
@@ -396,6 +404,7 @@ class DownloaderApp(tk.Tk):
             download_folder,
             create_site_subfolder,
             skip_existing,
+            filter_dmm_fanza,
         )
 
     def remove_selected(self) -> None:
@@ -443,9 +452,12 @@ class DownloaderApp(tk.Tk):
         return WorkItem(item_id=item.item_id, url=item.url, source=item.source, article=item.article)
 
     def _has_scan_work(self) -> bool:
+        filter_dmm_fanza = self.filter_dmm_fanza.get()
         with self.queue_condition:
             return any(
-                item.article is None and item.status not in ACTIVE_STATUSES
+                item.status != "Done"
+                and item.status not in ACTIVE_STATUSES
+                and (item.article is None or item.filter_dmm_fanza != filter_dmm_fanza)
                 for item in self.items.values()
             )
 
@@ -456,25 +468,7 @@ class DownloaderApp(tk.Tk):
                 for item in self.items.values()
             )
 
-    def _next_scan_work(self, attempted: set[str]) -> WorkItem | None:
-        with self.queue_condition:
-            if self.stop_requested:
-                raise QueueStopped
-            for item_id in self.item_order:
-                if item_id in attempted:
-                    continue
-                item = self.items.get(item_id)
-                if item is None or item.article is not None or item.status in ACTIVE_STATUSES:
-                    continue
-                item.status = "Scanning"
-                item.progress = 0
-                item.speed = "-"
-                item.speed_updated_at = 0
-                item.error = ""
-                return self._work_item(item_id)
-        return None
-
-    def _next_download_work(self, attempted: set[str]) -> WorkItem | None:
+    def _next_scan_work(self, attempted: set[str], filter_dmm_fanza: bool) -> WorkItem | None:
         with self.queue_condition:
             if self.stop_requested:
                 raise QueueStopped
@@ -484,12 +478,41 @@ class DownloaderApp(tk.Tk):
                 item = self.items.get(item_id)
                 if item is None or item.status == "Done" or item.status in ACTIVE_STATUSES:
                     continue
-                item.status = "Scanning" if item.article is None else "Downloading"
+                if item.article is not None and item.filter_dmm_fanza == filter_dmm_fanza:
+                    continue
+                item.status = "Scanning"
                 item.progress = 0
                 item.speed = "-"
                 item.speed_updated_at = 0
                 item.error = ""
                 return self._work_item(item_id)
+        return None
+
+    def _next_download_work(self, attempted: set[str], filter_dmm_fanza: bool) -> WorkItem | None:
+        with self.queue_condition:
+            if self.stop_requested:
+                raise QueueStopped
+            for item_id in self.item_order:
+                if item_id in attempted:
+                    continue
+                item = self.items.get(item_id)
+                if item is None or item.status == "Done" or item.status in ACTIVE_STATUSES:
+                    continue
+                needs_scan = item.article is None or item.filter_dmm_fanza != filter_dmm_fanza
+                item.status = "Scanning" if needs_scan else "Downloading"
+                item.progress = 0
+                item.speed = "-"
+                item.speed_updated_at = 0
+                item.error = ""
+                work = self._work_item(item_id)
+                if needs_scan:
+                    return WorkItem(
+                        item_id=work.item_id,
+                        url=work.url,
+                        source=work.source,
+                        article=None,
+                    )
+                return work
         return None
 
     def _wait_if_paused(self) -> None:
@@ -622,14 +645,14 @@ class DownloaderApp(tk.Tk):
         self.worker = Thread(target=target, args=args, daemon=True)
         self.worker.start()
 
-    def _scan_worker(self) -> None:
+    def _scan_worker(self, filter_dmm_fanza: bool) -> None:
         http = HttpClient()
         message = "Scan complete"
         attempted: set[str] = set()
         try:
             while True:
                 self._wait_if_paused()
-                work = self._next_scan_work(attempted)
+                work = self._next_scan_work(attempted, filter_dmm_fanza)
                 if work is None:
                     break
 
@@ -639,7 +662,7 @@ class DownloaderApp(tk.Tk):
                     )
                     self.events.put(("log", f"Scanning: {work.url}"))
                     self._raise_if_stopped()
-                    article = scan_article(work.url, http)
+                    article = scan_article(work.url, http, filter_dmm_fanza=filter_dmm_fanza)
                     self._raise_if_stopped()
                     source = source_name_for_url(work.url)
                     self._update_worker_item(
@@ -648,6 +671,7 @@ class DownloaderApp(tk.Tk):
                         source=source,
                         title=article.title,
                         image_count=len(article.images),
+                        filter_dmm_fanza=filter_dmm_fanza,
                         status="Ready",
                         progress=100,
                         speed="-",
@@ -659,6 +683,7 @@ class DownloaderApp(tk.Tk):
                                 "id": work.item_id,
                                 "article": article,
                                 "source": source,
+                                "filter_dmm_fanza": filter_dmm_fanza,
                                 "progress": 100,
                             },
                         )
@@ -682,6 +707,7 @@ class DownloaderApp(tk.Tk):
         download_folder: Path,
         create_site_subfolder: bool,
         skip_existing: bool,
+        filter_dmm_fanza: bool,
     ) -> None:
         http = HttpClient()
         message = "Download complete"
@@ -690,7 +716,7 @@ class DownloaderApp(tk.Tk):
         try:
             while True:
                 self._wait_if_paused()
-                work = self._next_download_work(attempted)
+                work = self._next_download_work(attempted, filter_dmm_fanza)
                 if work is None:
                     break
 
@@ -703,7 +729,7 @@ class DownloaderApp(tk.Tk):
                         )
                         self.events.put(("log", f"Scanning: {work.url}"))
                         self._raise_if_stopped()
-                        article = scan_article(work.url, http)
+                        article = scan_article(work.url, http, filter_dmm_fanza=filter_dmm_fanza)
                         self._raise_if_stopped()
                         source = source_name_for_url(work.url)
                         self._update_worker_item(
@@ -712,6 +738,7 @@ class DownloaderApp(tk.Tk):
                             source=source,
                             title=article.title,
                             image_count=len(article.images),
+                            filter_dmm_fanza=filter_dmm_fanza,
                             status="Ready",
                             progress=0,
                             speed="-",
@@ -723,6 +750,7 @@ class DownloaderApp(tk.Tk):
                                     "id": work.item_id,
                                     "article": article,
                                     "source": source,
+                                    "filter_dmm_fanza": filter_dmm_fanza,
                                     "progress": 0,
                                 },
                             )
@@ -887,6 +915,8 @@ class DownloaderApp(tk.Tk):
             item.source = source
             item.title = article.title
             item.image_count = len(article.images)
+            if "filter_dmm_fanza" in data:
+                item.filter_dmm_fanza = bool(data["filter_dmm_fanza"])
             item.status = "Ready"
             item.progress = float(data.get("progress", 0))
             item.speed = "-"
