@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -45,7 +45,41 @@ def decode_html(body: bytes, content_type: str) -> str:
         if part.lower().startswith("charset="):
             charset = part.split("=", 1)[1].strip() or charset
             break
-    return body.decode(charset, errors="replace")
+    try:
+        return body.decode(charset, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def iri_to_uri(url: str) -> str:
+    split = urlsplit(url)
+    hostname = split.hostname
+    if not hostname:
+        return url
+
+    try:
+        ascii_host = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        ascii_host = hostname
+
+    netloc = ascii_host
+    if split.port:
+        netloc = f"{netloc}:{split.port}"
+    if split.username:
+        userinfo = quote(split.username, safe="%")
+        if split.password is not None:
+            userinfo = f"{userinfo}:{quote(split.password, safe='%')}"
+        netloc = f"{userinfo}@{netloc}"
+
+    return urlunsplit(
+        (
+            split.scheme,
+            netloc,
+            quote(split.path, safe="/%"),
+            quote(split.query, safe="=&;%:+,/?"),
+            quote(split.fragment, safe="%"),
+        )
+    )
 
 
 class HttpClient:
@@ -66,8 +100,9 @@ class HttpClient:
     def get(self, url: str, *, referer: str | None = None) -> HttpResponse:
         headers = dict(self._base_headers)
         if referer:
-            headers["Referer"] = referer
-        request = Request(url, headers=headers, method="GET")
+            headers["Referer"] = iri_to_uri(referer)
+        request_url = iri_to_uri(url)
+        request = Request(request_url, headers=headers, method="GET")
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 status = getattr(response, "status", 200)
@@ -101,9 +136,10 @@ class HttpClient:
             "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         }
         if referer:
-            headers["Referer"] = referer
+            headers["Referer"] = iri_to_uri(referer)
 
-        request = Request(url, headers=headers, method="GET")
+        request_url = iri_to_uri(url)
+        request = Request(request_url, headers=headers, method="GET")
         part_path = destination.with_name(f"{destination.name}.part")
 
         try:

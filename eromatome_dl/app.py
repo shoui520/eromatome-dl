@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from eromatome_dl.encoding import configure_utf8
+
+configure_utf8()
+
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
